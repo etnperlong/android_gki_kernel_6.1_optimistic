@@ -690,11 +690,11 @@ static int read_from_bdev_async(struct zram *zram, struct bio_vec *bvec,
 /* Idle writeback until this much compressed data (KiB) has left memory. */
 #define SIZE_WB_SIG "wb_size="
 
-#define PAGE_WRITEBACK 0
-#define HUGE_WRITEBACK (1<<0)
-#define IDLE_WRITEBACK (1<<1)
-#define SIZE_WRITEBACK (1<<2)
-
+#define PAGE_WRITEBACK			0
+#define HUGE_WRITEBACK			(1<<0)
+#define IDLE_WRITEBACK			(1<<1)
+#define INCOMPRESSIBLE_WRITEBACK	(1<<2)
+#define SIZE_WRITEBACK			(1<<3)
 
 static ssize_t writeback_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t len)
@@ -717,6 +717,8 @@ static ssize_t writeback_store(struct device *dev,
 		mode = HUGE_WRITEBACK;
 	else if (sysfs_streq(buf, "huge_idle"))
 		mode = IDLE_WRITEBACK | HUGE_WRITEBACK;
+	else if (sysfs_streq(buf, "incompressible"))
+		mode = INCOMPRESSIBLE_WRITEBACK;
 	else if (!strncmp(buf, SIZE_WB_SIG, sizeof(SIZE_WB_SIG) - 1)) {
 		if (kstrtou64(buf + sizeof(SIZE_WB_SIG) - 1, 10, &wb_bytes) ||
 				!wb_bytes || wb_bytes > (U64_MAX >> 10))
@@ -786,11 +788,15 @@ static ssize_t writeback_store(struct device *dev,
 			goto next;
 
 		if (mode & IDLE_WRITEBACK &&
-			  !zram_test_flag(zram, index, ZRAM_IDLE))
+		    !zram_test_flag(zram, index, ZRAM_IDLE))
 			goto next;
 		if (mode & HUGE_WRITEBACK &&
-			  !zram_test_flag(zram, index, ZRAM_HUGE))
+		    !zram_test_flag(zram, index, ZRAM_HUGE))
 			goto next;
+		if (mode & INCOMPRESSIBLE_WRITEBACK &&
+		    !zram_test_flag(zram, index, ZRAM_INCOMPRESSIBLE))
+			goto next;
+
 		/*
 		 * Clearing ZRAM_UNDER_WB is duty of caller.
 		 * IOW, zram_free_page never clear it.
