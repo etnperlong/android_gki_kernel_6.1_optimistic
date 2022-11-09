@@ -5,12 +5,13 @@ config ZRAM_EXT
 	select ZSMALLOC
 	help
 	  A copy of the zram driver, built as the zram_ext module with
-	  writeback to a backing device and per-slot access time tracking
-	  always enabled. GKI builds zram.ko without CONFIG_ZRAM_WRITEBACK
-	  and CONFIG_ZRAM_MEMORY_TRACKING, and a vendor module cannot change
-	  that, so devices that need them load zram_ext.ko instead of
-	  zram.ko. Both register the same block device and the same
-	  zram-control class: only one of them can be loaded.
+	  writeback to a backing device, per-slot access time tracking and
+	  recompression with secondary algorithms always enabled. GKI builds
+	  zram.ko without CONFIG_ZRAM_WRITEBACK, CONFIG_ZRAM_MEMORY_TRACKING
+	  and (on 6.1) recompression, and a vendor module cannot change that,
+	  so devices that need them load zram_ext.ko instead of zram.ko. Both
+	  register the same block device and the same zram-control class:
+	  only one of them can be loaded.
 
 	  The default compressor is the one chosen for ZRAM.
 
