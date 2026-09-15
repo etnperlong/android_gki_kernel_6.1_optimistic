@@ -43,7 +43,7 @@ static const char* rpc_type[] = {
 };
 static struct sock* netlink_socket;
 extern struct net init_net;
-static unsigned long netlink_unit = 0;
+static int netlink_unit;
 #ifdef CONFIG_PROC_FS
 static struct proc_dir_entry* rekernel_dir, * rekernel_unit_entry;
 #endif /* CONFIG_PROC_FS */
@@ -193,11 +193,11 @@ static int rekernel_unit_show(struct seq_file* m, void* v) {
 static int rekernel_unit_open(struct inode* inode, struct file* file) {
 	return single_open(file, rekernel_unit_show, NULL);
 }
-static const struct file_operations rekernel_unit_fops = {
-	.open = rekernel_unit_open,
-	.read = seq_read,
-	.llseek = seq_lseek,
-	.release = single_release
+static const struct proc_ops rekernel_unit_fops = {
+	.proc_open = rekernel_unit_open,
+	.proc_read = seq_read,
+	.proc_lseek = seq_lseek,
+	.proc_release = single_release
 };
 #endif /* CONFIG_PROC_FS */
 // init
@@ -293,7 +293,7 @@ void rekernel_report(int reporttype, int type, pid_t src_pid, struct task_struct
 			}
 			snprintf(binder_kmsg, sizeof(binder_kmsg), "type=Binder,bindertype=%s,oneway=%d,from_pid=%d,from=%d,target_pid=%d,target=%d,rpc_name=%s,code=%d;", binder_type[type], oneway, src_pid, task_uid(src).val, dst_pid, task_uid(dst).val, buf, tr->code);
 		} else {
-			snprintf(binder_kmsg, sizeof(binder_kmsg), "type=Binder,bindertype=%s,oneway=%d,from_pid=%d,from=%d,target_pid=%d,target=%d;", binder_type[type], oneway, src_pid, task_uid(src).val, dst_pid, task_uid(dst).val, rpc_type[type], -1);
+			snprintf(binder_kmsg, sizeof(binder_kmsg), "type=Binder,bindertype=%s,oneway=%d,from_pid=%d,from=%d,target_pid=%d,target=%d,rpc_name=%s,code=%d;", binder_type[type], oneway, src_pid, task_uid(src).val, dst_pid, task_uid(dst).val, rpc_type[type], -1);
 		}
 		break;
 	case SIGNAL:
