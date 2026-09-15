@@ -1,42 +1,51 @@
-menu "Baseband Security Guard Configuration"
+# SPDX-License-Identifier: GPL-2.0-only
+menu "Baseband Guard"
 
 config BBG
-       bool "Enable Baseband Guard (Anti-Format)" 
-       default y
-       depends on SECURITY
-       help
-          An Android baseband anti-formatting protector 
-          module by Github@showdo, preventing malicious
-          scripts or programs writing into important
-          function partitions.
-          If unsure, leave this y.
+	bool "Baseband Guard block device write protection"
+	depends on SECURITY && SECURITY_SELINUX && BLOCK
+	default n
+	help
+	  Deny writes, attribute changes and destructive ioctls on block
+	  devices that are not on a small allowlist, for processes that
+	  descend from an execve into an su, ksu or magisk SELinux domain.
+
+	  The allowlist covers the partitions a root user has a legitimate
+	  reason to rewrite - boot, dtbo, the vbmeta set, userdata,
+	  metadata, misc and cache - plus zram.  Everything else, including
+	  preloader, lk, tee, the modem images and the raw disks, becomes
+	  read-only for root.  Processes that never exec through a root
+	  domain, such as update_engine or a vendor HAL, are unaffected.
+
+	  This requires "baseband_guard" in CONFIG_LSM, listed after
+	  "selinux" so that SELinux keeps cred blob offset 0.  The build
+	  fails with an explicit error if it is missing.
+
+	  This is a guard against destructive mistakes, not a privilege
+	  boundary: anything able to load a module or write kernel memory
+	  can switch it off.
+
+	  If unsure, say N.
 
 config BBG_BLOCK_BOOT
-       bool "Enable Baseband Protection for Boot Partition"
-       depends on BBG
-       default n
-       help
-          Enable protection for boot partition to
-          prevent malicious scripts or programs
-          destroying, however this may cause failure
-          when flashing kernels in Android system
-          (meaning that you'll only be able to flash
-          kernels/boot partition image in recovery/
-          fastboot mode).
-          If unsure, leave this n.
+	bool "Also protect boot, init_boot, vendor_boot and vendor_kernel_boot"
+	depends on BBG
+	default n
+	help
+	  Remove the boot images from the allowlist.  Flashing a kernel
+	  from a running Android system then stops working; recovery,
+	  fastbootd and the bootloader remain the only way in.
+
+	  If unsure, say N.
 
 config BBG_BLOCK_RECOVERY
-       bool "Enable Baseband Protection for Recovery Partition"
-       depends on BBG
-       default n
-       help
-          Enable protection for recovery partition to
-          prevent malicious scripts or programs
-          destroying, however this may cause failure
-          when flashing custom recs in Android system
-          (meaning that you'll only be able to flash
-          recovery partition image in fastbootd/
-          bootloader mode).
-          If unsure, leave this n.
+	bool "Also protect recovery"
+	depends on BBG
+	default n
+	help
+	  Remove the recovery partition from the allowlist.  Flashing a
+	  custom recovery from a running Android system then stops working.
+
+	  If unsure, say N.
 
 endmenu

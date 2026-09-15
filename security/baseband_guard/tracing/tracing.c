@@ -1,119 +1,124 @@
-#include "kernel_compat.h"
-#include <linux/security.h>
-#include <linux/errno.h>
+// SPDX-License-Identifier: GPL-2.0
+#include <linux/binfmts.h>
 #include <linux/cred.h>
+#include <linux/errno.h>
+#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/lsm_hooks.h>
+#include <linux/printk.h>
+#include <linux/sched.h>
+#include <linux/security.h>
+#include <linux/string.h>
 
-int bb_cred_prepare(struct cred *new, const struct cred *old, gfp_t gfp);
-void bb_cred_transfer(struct cred *new, const struct cred *old);
-int bb_bprm_set_creds(struct linux_binprm *bprm);
+#include "tracing.h"
 
-int __maybe_unused bbg_process_setpermissive(void);
-int __maybe_unused bbg_test_domain_transition(u32 target_secid);
-
-#ifdef BBG_USE_DEFINE_LSM
 struct lsm_blob_sizes bbg_blob_sizes __ro_after_init = {
 	.lbs_cred = sizeof(struct bbg_cred_security_struct),
 };
-#else
-static inline struct task_security_struct *selinux_cred(const struct cred *cred)
+
+/*
+ * SELinux domains a root implementation transitions into on execve.  A
+ * process that passes through one of these, and every process it later
+ * forks or execs, is treated as untrusted.
+ */
+static const char * const bbg_root_contexts[] = {
+	"u:r:su:s0",		/* KernelSU (legacy), APatch */
+	"u:r:ksu:s0",		/* KernelSU (current) */
+	"u:r:magisk:s0",	/* Magisk */
+};
+
+static u32 bbg_root_sids[ARRAY_SIZE(bbg_root_contexts)];
+static bool bbg_root_sids_valid;
+
+/*
+ * Resolve the contexts once, the first time a lookup happens after the
+ * policy has been loaded.  Racing callers compute identical values, so the
+ * array contents never disagree.
+ *
+ * A policy reload can in principle renumber these SIDs.  Android loads its
+ * policy once during early init, so this is not handled.
+ */
+static bool bbg_is_root_domain(u32 secid)
 {
-	return cred->security;
+	unsigned int i;
+
+	if (!secid)
+		return false;
+
+	/*
+	 * Pairs with the smp_store_release() below: a reader that sees the
+	 * flag set must also see every bbg_root_sids[] store before it.
+	 */
+	if (!smp_load_acquire(&bbg_root_sids_valid)) {
+		u32 sids[ARRAY_SIZE(bbg_root_contexts)];
+		bool resolved_any = false;
+
+		for (i = 0; i < ARRAY_SIZE(bbg_root_contexts); i++) {
+			const char *ctx = bbg_root_contexts[i];
+
+			if (security_secctx_to_secid(ctx, strlen(ctx), &sids[i]))
+				sids[i] = 0;
+			else
+				resolved_any = true;
+		}
+
+		/* No policy yet: nothing can be in a root domain either. */
+		if (!resolved_any)
+			return false;
+
+		for (i = 0; i < ARRAY_SIZE(bbg_root_contexts); i++)
+			bbg_root_sids[i] = sids[i];
+
+		/* Publish the table before the flag that advertises it. */
+		smp_store_release(&bbg_root_sids_valid, true);
+	}
+
+	for (i = 0; i < ARRAY_SIZE(bbg_root_contexts); i++)
+		if (secid == bbg_root_sids[i])
+			return true;
+
+	return false;
 }
-#endif
 
-int bb_cred_prepare(struct cred *new, const struct cred *old,
-					gfp_t gfp)
+int bb_cred_prepare(struct cred *new, const struct cred *old, gfp_t gfp)
 {
-	const struct bbg_cred_security_struct *old_tsec = bbg_cred(old);
-	struct bbg_cred_security_struct *tsec = bbg_cred(new);
-
-	*tsec = *old_tsec;
+	*bbg_cred(new) = *bbg_cred(old);
 	return 0;
 }
+
 void bb_cred_transfer(struct cred *new, const struct cred *old)
 {
-	const struct bbg_cred_security_struct *old_tsec = bbg_cred(old);
-	struct bbg_cred_security_struct *tsec = bbg_cred(new);
-
-	*tsec = *old_tsec;
+	*bbg_cred(new) = *bbg_cred(old);
 }
 
 int bb_bprm_set_creds(struct linux_binprm *bprm)
 {
-	static int su_sid = -1;
-	static int magisk_sid = -1;
-	static int ksu_sid = -1;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
-	struct task_security_struct *new_selinux_tsec;
-	const struct task_security_struct *old_selinux_tsec;
-#else
-	struct cred_security_struct *new_selinux_tsec;
-	const struct cred_security_struct *old_selinux_tsec;
-#endif
-	const struct bbg_cred_security_struct *old_bbg_tsec;
-	struct bbg_cred_security_struct *new_bbg_tsec;
+	struct bbg_cred_security_struct *new_tsec = bbg_cred(bprm->cred);
+	u32 old_sid, new_sid;
 
-	old_selinux_tsec = selinux_cred(current_cred());
-	new_selinux_tsec = selinux_cred(bprm->cred);
-	new_bbg_tsec = bbg_cred(bprm->cred);
-	old_bbg_tsec = bbg_cred(current_cred());
+	new_tsec->is_untrusted_process =
+		bbg_cred(current_cred())->is_untrusted_process;
 
-	new_bbg_tsec->is_untrusted_process = old_bbg_tsec->is_untrusted_process;
+	/* Already inherited the mark, no need to look at the domain. */
+	if (new_tsec->is_untrusted_process)
+		return 0;
 
-	if (new_bbg_tsec->is_untrusted_process) {
-		return 0; // already flag as untrusted_process, no need check current domain
-	}
+	/*
+	 * baseband_guard is ordered after selinux in CONFIG_LSM, so by the
+	 * time this runs selinux has already stamped the post-exec SID onto
+	 * bprm->cred.  Checking the old and the new SID therefore covers
+	 * both "exec issued from a root domain" and "exec transitions into
+	 * one".
+	 */
+	security_cred_getsecid(current_cred(), &old_sid);
+	security_cred_getsecid(bprm->cred, &new_sid);
 
-	if (unlikely(!selinux_initialized_compat())) return 0; // we keep this only for module scripts, i don't want hook execve
+	if (!bbg_is_root_domain(old_sid) && !bbg_is_root_domain(new_sid))
+		return 0;
 
-	if (su_sid == -1) { // root impl compatible
-		if (security_secctx_to_secid("u:r:su:s0", strlen("u:r:su:s0"), &su_sid)) {
-			su_sid = -EINVAL;
-		}
-	}
-
-	if (magisk_sid == -1) {
-		if (security_secctx_to_secid("u:r:magisk:s0", strlen("u:r:magisk:s0"), &magisk_sid) != 0) {
-			magisk_sid = -EINVAL;
-		}
-	}
-
-	if (ksu_sid == -1) {
-                if (security_secctx_to_secid("u:r:ksu:s0", strlen("u:r:ksu:s0"), &ksu_sid) != 0) {
-                        ksu_sid = -EINVAL;
-                }
-        }
-
-	if (unlikely(
-		old_selinux_tsec->sid == su_sid || old_selinux_tsec->osid == su_sid || // kernelsu old
-		new_selinux_tsec->sid == su_sid || new_selinux_tsec->osid == su_sid ||
-
-                old_selinux_tsec->sid == ksu_sid || old_selinux_tsec->osid == ksu_sid || // kernelsu new
-                new_selinux_tsec->sid == ksu_sid || new_selinux_tsec->osid == ksu_sid ||
-
-		old_selinux_tsec->sid == magisk_sid || old_selinux_tsec->osid == magisk_sid || // magisk/apatch
-		new_selinux_tsec->sid == magisk_sid || new_selinux_tsec->osid == magisk_sid
-	)) {
-		new_bbg_tsec->is_untrusted_process = 1;
-		pr_info("baseband_guard: pid %d has been marked as untrusted process due to its selinux domain\n",
-			current->pid);
-	}
+	new_tsec->is_untrusted_process = 1;
+	pr_info("baseband_guard: pid %d marked untrusted by SELinux domain\n",
+		current->pid);
 
 	return 0;
 }
-
-int __maybe_unused bbg_process_setpermissive(void)
-{
-	return 0;
-}
-
-int __maybe_unused bbg_test_domain_transition(u32 target_secid)
-{
-	return 0;
-}
-
-#ifndef BBG_USE_DEFINE_LSM
-struct bbg_cred_security_struct* bbg_cred(const struct cred *cred) {
-	return &((struct task_security_struct *)cred->security)->bbg_cred;
-}
-#endif

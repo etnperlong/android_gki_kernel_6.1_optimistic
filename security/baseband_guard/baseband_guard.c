@@ -220,10 +220,6 @@ static int bb_file_ioctl_compat(struct file *file, unsigned int cmd, unsigned lo
 }
 #endif
 
-extern int bb_bprm_set_creds(struct linux_binprm *bprm);
-extern void bb_cred_transfer(struct cred *new, const struct cred *old);
-extern int bb_cred_prepare(struct cred *new, const struct cred *old, gfp_t gfp);
-
 static struct security_hook_list bb_hooks[] = {
 	LSM_HOOK_INIT(file_permission,      bb_file_permission),
 	LSM_HOOK_INIT(file_ioctl,           bb_file_ioctl),
@@ -244,24 +240,16 @@ static struct security_hook_list bb_hooks[] = {
 
 static int __init bbg_init(void)
 {
-	security_add_hooks_compat(bb_hooks, ARRAY_SIZE(bb_hooks)); // init lsm hooks and print version notice
-	pr_info("baseband_guard power by https://t.me/qdykernel\n");
-	pr_info("baseband_guard repo: %s", __stringify(BBG_REPO));
-	pr_info("baseband_guard version: %s", __stringify(BBG_VERSION));
+	security_add_hooks_compat(bb_hooks, ARRAY_SIZE(bb_hooks));
+	pr_info("baseband_guard: version %s active\n", BBG_VERSION);
 	return 0;
 }
 
-extern struct lsm_blob_sizes bbg_blob_sizes;
-
-#ifndef BBG_USE_DEFINE_LSM
-security_initcall(bbg_init);
-#else
 DEFINE_LSM(baseband_guard) = {
 	.name = "baseband_guard",
 	.init = bbg_init,
 	.blobs = &bbg_blob_sizes
 };
-#endif
 
 MODULE_DESCRIPTION("protect All Block & Power by TG@qdykernel");
 MODULE_AUTHOR("秋刀鱼 & https://t.me/qdykernel");

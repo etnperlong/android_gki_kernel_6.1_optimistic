@@ -1,44 +1,20 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef _BBG_KERNEL_COMPAT_H_
+#define _BBG_KERNEL_COMPAT_H_
+
 #include <linux/blkdev.h>
-#include <linux/security.h>
+#include <linux/err.h>
 #include <linux/lsm_hooks.h>
+#include <linux/security.h>
+#include <linux/string.h>
 #include <linux/version.h>
-#include "objsec.h"
-#include "blk.h"
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
-static __maybe_unused inline int lookup_bdev_compat(char *path, dev_t *out) {
-    struct block_device *bdev;
-
-    if (!path || !out) {
-        return 1;
-    }
-
-    bdev = lookup_bdev(path);
-	if (IS_ERR(bdev))
-		return 1;
-	*out = bdev->bd_dev;
-	bdput(bdev);
-	return 0;
-}
-#else
-static __maybe_unused inline int lookup_bdev_compat(char *path, dev_t *out) {
-    dev_t dev;
-	int ret;
-
-    if (!path || !out) {
-        return 1;
-    }
-
-    ret = lookup_bdev(path, &dev);
-	if (ret) return ret;
-
-	*out = dev;
-	return 0;
-}
-#endif
-
+/*
+ * Match a block device by gendisk name prefix.  Used for zram, whose nodes
+ * carry no partition metadata and so cannot be matched by volume name.
+ */
 // https://github.com/torvalds/linux/commit/22ae8ce8b89241c94ac00c237752c0ffa37ba5ae
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0) 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,11,0)
 
 static __maybe_unused bool bbg_is_named_device(dev_t dev, const char *name_prefix)
 {
@@ -75,12 +51,13 @@ static __maybe_unused bool bbg_is_named_device(dev_t dev, const char *name_prefi
     bdev = blkdev_get_no_open(dev, true);
 #endif
 
-    if (IS_ERR(bdev))
+    if (IS_ERR_OR_NULL(bdev))
         return false;
 
     if (bdev->bd_disk && name_prefix) {
         const char *disk_name = bdev->bd_disk->disk_name;
         size_t prefix_len = strlen(name_prefix);
+
         match = (strncmp(disk_name, name_prefix, prefix_len) == 0);
     }
 
@@ -92,7 +69,7 @@ static __maybe_unused bool bbg_is_named_device(dev_t dev, const char *name_prefi
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,8,0)
-const struct lsm_id bbg_lsmid = {
+static const struct lsm_id bbg_lsmid = {
 	.name = "baseband_guard",
 	.id = 995,
 };
@@ -108,3 +85,5 @@ static __maybe_unused inline void __init security_add_hooks_compat(struct securi
 #endif
 
 }
+
+#endif /* _BBG_KERNEL_COMPAT_H_ */

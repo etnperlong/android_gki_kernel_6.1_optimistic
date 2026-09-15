@@ -290,6 +290,8 @@ config LSM
 
 	  If unsure, leave this as the default.
 
+source "security/baseband_guard/Kconfig"
+
 source "security/Kconfig.hardening"
 
 endmenu
