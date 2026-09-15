@@ -12,6 +12,7 @@
 #include <linux/cred.h>
 #include <linux/dcache.h>
 #include <linux/hashtable.h>
+#include <linux/ratelimit.h>
 #include <linux/rcupdate.h>
 #include <linux/spinlock.h>
 
@@ -115,54 +116,44 @@ static const char *bbg_file_path(struct file *file, char *buf, int buflen)
 	return IS_ERR(p) ? NULL : p;
 }
 
-static int bbg_get_cmdline(char *buf, int buflen)
-{
-	int n, i;
-	if (!buf || buflen <= 0) return 0;
-	n = get_cmdline(current, buf, buflen);
-	if (n <= 0) return 0;
-	for (i = 0; i < n - 1; i++) if (buf[i] == '\0') buf[i] = ' ';
-	if (n < buflen) buf[n] = '\0';
-	else buf[buflen - 1] = '\0';
-	return n;
-}
+/*
+ * A denied writer usually retries, so the log has to be bounded or a single
+ * stuck script scrolls the ring buffer clear of everything that mattered.
+ * An explicit ratelimit_state rather than pr_warn_ratelimited() because the
+ * path buffer must only be allocated when the message is actually going out.
+ */
+static DEFINE_RATELIMIT_STATE(bbg_deny_rs, 5 * HZ, 10);
 
-static void bbg_log_deny_detail(const char *why, struct file *file, struct inode *inode, unsigned int cmd_opt)
+static void bbg_log_deny_detail(const char *why, struct file *file,
+				struct inode *inode, unsigned int cmd_opt)
 {
 	const int PATH_BUFLEN = 256;
-	const int CMD_BUFLEN  = 256;
-
-	char *pathbuf = kmalloc(PATH_BUFLEN, GFP_ATOMIC);
-	char *cmdbuf  = kmalloc(CMD_BUFLEN,  GFP_ATOMIC);
-
-	const char *path = pathbuf ? bbg_file_path(file, pathbuf, PATH_BUFLEN) : NULL;
 	dev_t dev = inode ? inode->i_rdev : 0;
+	const char *path = NULL;
+	char *pathbuf;
 
-	if (cmdbuf)
-		bbg_get_cmdline(cmdbuf, CMD_BUFLEN);
+	if (!__ratelimit(&bbg_deny_rs))
+		return;
 
-	if (cmd_opt) {
-		pr_info(
-			"baseband_guard: deny %s cmd=0x%x dev=%u:%u path=%s pid=%d comm=%s argv=\"%s\"\n",
+	pathbuf = kmalloc(PATH_BUFLEN, GFP_ATOMIC | __GFP_NOWARN);
+	if (pathbuf)
+		path = bbg_file_path(file, pathbuf, PATH_BUFLEN);
+
+	if (cmd_opt)
+		pr_warn("baseband_guard: deny %s cmd=0x%x dev=%u:%u path=%s pid=%d comm=%s\n",
 			why, cmd_opt, MAJOR(dev), MINOR(dev),
-			path ? path : "?", current->pid, current->comm,
-			cmdbuf ? cmdbuf : "?");
-	} else {
-		pr_info(
-			"baseband_guard: deny %s dev=%u:%u path=%s pid=%d comm=%s argv=\"%s\"\n",
+			path ? path : "?", current->pid, current->comm);
+	else
+		pr_warn("baseband_guard: deny %s dev=%u:%u path=%s pid=%d comm=%s\n",
 			why, MAJOR(dev), MINOR(dev),
-			path ? path : "?", current->pid, current->comm,
-			cmdbuf ? cmdbuf : "?");
-	}
+			path ? path : "?", current->pid, current->comm);
 
-	kfree(cmdbuf);
 	kfree(pathbuf);
 }
 
 static int deny(const char *why, struct file *file, struct inode *inode, unsigned int cmd_opt)
 {
 	bbg_log_deny_detail(why, file, inode, cmd_opt);
-	bb_pr_rl("deny %s pid=%d comm=%s\n", why, current->pid, current->comm);
 	if (!BB_ENFORCING) return 0;
 	return -EPERM;
 }
