@@ -12,32 +12,73 @@
 #include <linux/cred.h>
 #include <linux/dcache.h>
 #include <linux/hashtable.h>
+#include <linux/rcupdate.h>
+#include <linux/spinlock.h>
 
 #include "kernel_compat.h"
 #include "baseband_guard.h"
 #include "tracing/tracing.h"
 #include "blkdev_helper.h"
 
-struct device_hash_node { dev_t dev; struct hlist_node h; };
-DEFINE_HASHTABLE(allowed_devs, 7);
+struct device_hash_node {
+	dev_t			dev;
+	struct hlist_node	h;
+};
+
+/*
+ * Devices that resolved to an allowlisted partition, cached so the
+ * bd_meta_info lookup happens once per device rather than once per write.
+ *
+ * Readers run from the file_permission hook on every block device write and
+ * take nothing but rcu_read_lock(); the spinlock only serialises insertion.
+ * Entries are never removed, so no grace period is ever required.  A dev_t
+ * reused by a different device would keep the stale verdict, which cannot
+ * happen here: only GPT partitions and zram are ever cached and neither is
+ * torn down at runtime.
+ */
+static DEFINE_HASHTABLE(allowed_devs, 7);
+static DEFINE_SPINLOCK(allowed_devs_lock);
 
 static bool allow_has(dev_t dev)
 {
 	struct device_hash_node *p;
+	bool found = false;
 
-	hash_for_each_possible(allowed_devs, p, h, (u64)dev)
-		if (p->dev == dev) return true;
-	return false;
+	rcu_read_lock();
+	hash_for_each_possible_rcu(allowed_devs, p, h, (u64)dev) {
+		if (p->dev == dev) {
+			found = true;
+			break;
+		}
+	}
+	rcu_read_unlock();
+
+	return found;
 }
 
 static void allow_add(dev_t dev)
 {
-	struct device_hash_node *n;
-	if (!dev || allow_has(dev)) return;
-	n = kmalloc(sizeof(*n), GFP_ATOMIC);
-	if (!n) return;
+	struct device_hash_node *n, *p;
+
+	if (!dev || allow_has(dev))
+		return;
+
+	n = kmalloc(sizeof(*n), GFP_ATOMIC | __GFP_NOWARN);
+	if (!n)
+		return;
 	n->dev = dev;
-	hash_add(allowed_devs, &n->h, (u64)dev);
+
+	spin_lock(&allowed_devs_lock);
+	hash_for_each_possible(allowed_devs, p, h, (u64)dev) {
+		if (p->dev == dev) {
+			spin_unlock(&allowed_devs_lock);
+			kfree(n);
+			return;
+		}
+	}
+	hash_add_rcu(allowed_devs, &n->h, (u64)dev);
+	spin_unlock(&allowed_devs_lock);
+
 	bb_pr("allow-cache dev %u:%u\n", MAJOR(dev), MINOR(dev));
 }
 
