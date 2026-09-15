@@ -3,6 +3,7 @@
 #include <linux/cred.h>
 #include <linux/errno.h>
 #include <linux/init.h>
+#include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/lsm_hooks.h>
 #include <linux/printk.h>
@@ -29,14 +30,39 @@ static const char * const bbg_root_contexts[] = {
 
 static u32 bbg_root_sids[ARRAY_SIZE(bbg_root_contexts)];
 static bool bbg_root_sids_valid;
+static unsigned long bbg_resolve_deadline;
 
 /*
- * Resolve the contexts once, the first time a lookup happens after the
- * policy has been loaded.  Racing callers compute identical values, so the
- * array contents never disagree.
- *
- * A policy reload can in principle renumber these SIDs.  Android loads its
- * policy once during early init, so this is not handled.
+ * A context string that no policy can define.  Before the first policy load
+ * security_context_to_sid() answers every unrecognised context with
+ * SECINITSID_KERNEL and reports success (security/selinux/ss/services.c,
+ * the !selinux_initialized() branch), so a lookup that succeeds proves
+ * nothing on its own.  While this probe still resolves, SELinux is not
+ * ready and no result may be believed or cached.
+ */
+#define BBG_ABSENT_CONTEXT "u:r:baseband_guard_absent_probe:s0"
+
+static bool bbg_selinux_ready(void)
+{
+	u32 sid;
+
+	return security_secctx_to_secid(BBG_ABSENT_CONTEXT,
+					strlen(BBG_ABSENT_CONTEXT), &sid) != 0;
+}
+
+/*
+ * KernelSU injects its su domain into the already-loaded policy, so the
+ * first execve after the policy load can still be too early to see it.
+ * Keep re-resolving until one of the contexts appears, then latch.  Give up
+ * and latch the empty result after this long so that a genuinely root-free
+ * build does not pay for the lookups on every execve forever.
+ */
+#define BBG_RESOLVE_SETTLE (120 * HZ)
+
+/*
+ * Racing callers compute identical values, so the array contents never
+ * disagree.  A policy reload can in principle renumber these SIDs; Android
+ * loads its policy once during early init, so this is not handled.
  */
 static bool bbg_is_root_domain(u32 secid)
 {
@@ -52,6 +78,18 @@ static bool bbg_is_root_domain(u32 secid)
 	if (!smp_load_acquire(&bbg_root_sids_valid)) {
 		u32 sids[ARRAY_SIZE(bbg_root_contexts)];
 		bool resolved_any = false;
+		unsigned long deadline;
+
+		if (!bbg_selinux_ready())
+			return false;
+
+		deadline = READ_ONCE(bbg_resolve_deadline);
+		if (!deadline) {
+			deadline = jiffies + BBG_RESOLVE_SETTLE;
+			if (!deadline)
+				deadline = 1;	/* 0 means "not armed yet" */
+			WRITE_ONCE(bbg_resolve_deadline, deadline);
+		}
 
 		for (i = 0; i < ARRAY_SIZE(bbg_root_contexts); i++) {
 			const char *ctx = bbg_root_contexts[i];
@@ -62,8 +100,7 @@ static bool bbg_is_root_domain(u32 secid)
 				resolved_any = true;
 		}
 
-		/* No policy yet: nothing can be in a root domain either. */
-		if (!resolved_any)
+		if (!resolved_any && time_before(jiffies, deadline))
 			return false;
 
 		for (i = 0; i < ARRAY_SIZE(bbg_root_contexts); i++)
