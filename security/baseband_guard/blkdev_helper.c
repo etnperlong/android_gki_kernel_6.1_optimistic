@@ -6,7 +6,7 @@
 #include "baseband_guard.h"
 #include "blkdev_helper.h"
 
-extern char *saved_command_line; 
+extern char *saved_command_line;
 static const char *slot_suffix_from_cmdline(void)
 {
 	const char *p = saved_command_line;

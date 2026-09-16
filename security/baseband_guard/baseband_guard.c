@@ -180,14 +180,13 @@ static int bb_file_permission(struct file *file, int mask)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6,9,0)
 static int bb_inode_setattr(struct mnt_idmap *idmap, struct dentry *dentry, struct iattr *iattr)
 #else
-static int bb_inode_setattr(struct dentry *dentry, struct iattr *iattr) 
+static int bb_inode_setattr(struct dentry *dentry, struct iattr *iattr)
 #endif
 {
 	struct inode *inode;
 
 	if (current_process_trusted())
-        return 0;
-	
+		return 0;
 	inode = d_inode(dentry);
 
 	if (likely(!S_ISBLK(inode->i_mode))) return 0;
@@ -286,5 +285,3 @@ DEFINE_LSM(baseband_guard) = {
 MODULE_DESCRIPTION("protect All Block & Power by TG@qdykernel");
 MODULE_AUTHOR("秋刀鱼 & https://t.me/qdykernel");
 MODULE_LICENSE("GPL v2");
-
-
