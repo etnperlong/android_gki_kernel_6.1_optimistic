@@ -73,29 +73,29 @@ All operations on the device are done through ioctls. There are four
 structures used in ioctl calls::
 
    struct ntsync_sem_args {
-   	__u32 count;
-   	__u32 max;
+      __u32 count;
+      __u32 max;
    };
 
    struct ntsync_mutex_args {
-   	__u32 owner;
-   	__u32 count;
+      __u32 owner;
+      __u32 count;
    };
 
    struct ntsync_event_args {
-   	__u32 manual;
-   	__u32 signaled;
+      __u32 manual;
+      __u32 signaled;
    };
 
    struct ntsync_wait_args {
-   	__u64 timeout;
-   	__u64 objs;
-   	__u32 count;
-   	__u32 index;
-   	__u32 flags;
-   	__u32 owner;
-   	__u32 alert;
-   	__u32 pad;
+      __u64 timeout;
+      __u64 objs;
+      __u32 count;
+      __u32 index;
+      __u32 flags;
+      __u32 owner;
+      __u32 alert;
+      __u32 pad;
    };
 
 Depending on the ioctl, members of the structure may be used as input,
