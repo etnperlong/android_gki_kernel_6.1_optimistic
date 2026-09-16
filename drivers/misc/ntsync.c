@@ -19,8 +19,28 @@
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/delay.h>
+#include <linux/namei.h>
+#include <linux/mount.h>
+#include <linux/path.h>
 #include <linux/time_namespace.h>
+#include <linux/workqueue.h>
+#include <linux/xattr.h>
 #include <uapi/linux/ntsync.h>
+
+/*
+ * Android policy cannot be changed for this kernel-only port.  The
+ * gpu_device label is therefore an explicitly downstream compatibility
+ * fallback for systems whose Wine domain already has that access.
+ */
+#if IS_BUILTIN(CONFIG_NTSYNC)
+#define NTSYNC_ANDROID_PERM_RETRIES	10
+#define NTSYNC_ANDROID_PERM_DELAY	msecs_to_jiffies(1000)
+
+static const char ntsync_android_context[] = "u:object_r:gpu_device:s0";
+static struct delayed_work ntsync_perm_work;
+static unsigned int ntsync_perm_retries;
+#endif
 
 #define NTSYNC_NAME	"ntsync"
 
@@ -1219,7 +1239,96 @@ static struct miscdevice ntsync_misc = {
 	.mode		= 0666,
 };
 
+#if IS_BUILTIN(CONFIG_NTSYNC)
+static int ntsync_set_android_access(void)
+{
+	struct iattr attr = {
+		.ia_valid = ATTR_MODE | ATTR_FORCE,
+		.ia_mode = 0666,
+	};
+	struct path path;
+	struct inode *inode;
+	struct user_namespace *mnt_userns;
+	int ret;
+
+	ret = kern_path("/dev/" NTSYNC_NAME, LOOKUP_FOLLOW, &path);
+	if (ret)
+		return ret;
+
+	inode = d_inode(path.dentry);
+	if (!inode || !S_ISCHR(inode->i_mode) ||
+	    imajor(inode) != MISC_MAJOR ||
+	    iminor(inode) != ntsync_misc.minor) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	ret = mnt_want_write(path.mnt);
+	if (ret)
+		goto out;
+	mnt_userns = mnt_user_ns(path.mnt);
+
+	inode_lock(inode);
+	ret = __vfs_setxattr_noperm(mnt_userns, path.dentry,
+				    XATTR_NAME_SELINUX,
+				    ntsync_android_context,
+				    sizeof(ntsync_android_context), 0);
+	if (!ret)
+		ret = notify_change(mnt_userns, path.dentry, &attr, NULL);
+	inode_unlock(inode);
+	mnt_drop_write(path.mnt);
+
+out:
+	path_put(&path);
+	return ret;
+}
+
+static void ntsync_perm_worker(struct work_struct *work)
+{
+	int ret;
+
+	ret = ntsync_set_android_access();
+	if (!ret) {
+		pr_info("ntsync: exposed /dev/%s as gpu_device mode 0666\n",
+			NTSYNC_NAME);
+		return;
+	}
+
+	if (++ntsync_perm_retries < NTSYNC_ANDROID_PERM_RETRIES) {
+		schedule_delayed_work(&ntsync_perm_work,
+				      NTSYNC_ANDROID_PERM_DELAY);
+		return;
+	}
+
+	pr_warn("ntsync: failed to expose /dev/%s after %u attempts: %d\n",
+		NTSYNC_NAME, ntsync_perm_retries, ret);
+}
+
+static int __init ntsync_init(void)
+{
+	int ret;
+
+	ret = misc_register(&ntsync_misc);
+	if (ret)
+		return ret;
+
+	INIT_DELAYED_WORK(&ntsync_perm_work, ntsync_perm_worker);
+	schedule_delayed_work(&ntsync_perm_work, NTSYNC_ANDROID_PERM_DELAY);
+	return 0;
+}
+
+static void __exit ntsync_exit(void)
+{
+	cancel_delayed_work_sync(&ntsync_perm_work);
+	misc_deregister(&ntsync_misc);
+}
+
+module_init(ntsync_init);
+module_exit(ntsync_exit);
+#else
 module_misc_device(ntsync_misc);
+#endif
+
 
 MODULE_AUTHOR("Elizabeth Figura <zfigura@codeweavers.com>");
 MODULE_DESCRIPTION("Kernel driver for NT synchronization primitives");
