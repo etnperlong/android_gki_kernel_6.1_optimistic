@@ -2298,6 +2298,31 @@ config UNWIND_PATCH_PAC_INTO_SCS
 	select UNWIND_TABLES
 	select DYNAMIC_SCS
 
+config ARM64_MARCH_ARMV9
+	bool "Generate C code for ARMv9.0-A"
+	depends on CC_IS_CLANG
+	depends on $(cc-option,-march=armv9-a)
+	help
+	  Pass -march=armv9-a when compiling C. The kernel keeps
+	  -mgeneral-regs-only, so no FP, SIMD or SVE code is generated;
+	  what changes is the base instruction set the compiler may assume
+	  (for example LSE atomics in compiler-generated code).
+
+	  The resulting kernel only runs on ARMv9 CPUs.
+
+	  If unsure, say N.
+
+config ARM64_TUNE_CORTEX_A715
+	bool "Tune code generation for Cortex-A715"
+	depends on $(cc-option,-mtune=cortex-a715)
+	help
+	  Pass -mtune=cortex-a715 so instruction scheduling targets the
+	  performance cores of SoCs such as MediaTek Dimensity 8300. This
+	  does not change the instruction set; the kernel still runs on
+	  any CPU it would run on otherwise.
+
+	  If unsure, say N.
+
 endmenu # "Kernel Features"
 
 menu "Boot options"

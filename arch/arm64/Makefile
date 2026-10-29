@@ -41,6 +41,13 @@ KBUILD_CFLAGS	+= -mgeneral-regs-only	\
 KBUILD_CFLAGS	+= $(call cc-disable-warning, psabi)
 KBUILD_AFLAGS	+= $(compat_vdso)
 
+ifeq ($(CONFIG_ARM64_MARCH_ARMV9),y)
+KBUILD_CFLAGS	+= -march=armv9-a
+endif
+ifeq ($(CONFIG_ARM64_TUNE_CORTEX_A715),y)
+KBUILD_CFLAGS	+= -mtune=cortex-a715
+endif
+
 KBUILD_CFLAGS	+= $(call cc-option,-mabi=lp64)
 KBUILD_AFLAGS	+= $(call cc-option,-mabi=lp64)
 
