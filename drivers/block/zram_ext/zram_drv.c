@@ -376,6 +376,48 @@ out:
 
 #ifdef CONFIG_ZRAM_WRITEBACK
 /*
+ * Whether writeback stores compressed objects rather than pages, named as
+ * upstream (and as AOSP mmd expects). Can only change before the device is
+ * initialized, so that all its written back slots are of the same kind.
+ */
+static ssize_t compressed_writeback_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t len)
+{
+	struct zram *zram = dev_to_zram(dev);
+	bool val;
+
+	if (kstrtobool(buf, &val))
+		return -EINVAL;
+
+	/* Partial reads decompress in place from a synchronous read */
+	if (val && PAGE_SIZE != 4096)
+		return -EOPNOTSUPP;
+
+	down_write(&zram->init_lock);
+	if (init_done(zram)) {
+		up_write(&zram->init_lock);
+		return -EBUSY;
+	}
+	zram->compressed_wb = val;
+	up_write(&zram->init_lock);
+
+	return len;
+}
+
+static ssize_t compressed_writeback_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct zram *zram = dev_to_zram(dev);
+	bool val;
+
+	down_read(&zram->init_lock);
+	val = zram->compressed_wb;
+	up_read(&zram->init_lock);
+
+	return scnprintf(buf, PAGE_SIZE, "%d\n", val);
+}
+
+/*
  * Compressed size of the idle pages still held in memory, i.e. what an
  * "idle" or "wb_size=" writeback could take out of the pool. Kept from
  * Lenovo's zram_ext, in the same "<KiB> K" format.
@@ -2366,6 +2408,9 @@ static void zram_reset_device(struct zram *zram)
 	zram_destroy_comps(zram);
 	memset(&zram->stats, 0, sizeof(zram->stats));
 	reset_bdev(zram);
+#ifdef CONFIG_ZRAM_WRITEBACK
+	zram->compressed_wb = false;
+#endif
 
 	comp_algorithm_set(zram, ZRAM_PRIMARY_COMP, default_compressor);
 	up_write(&zram->init_lock);
@@ -2504,6 +2549,7 @@ static DEVICE_ATTR_WO(writeback);
 static DEVICE_ATTR_RW(writeback_limit);
 static DEVICE_ATTR_RW(writeback_limit_enable);
 static DEVICE_ATTR_RO(idle_page_size);
+static DEVICE_ATTR_RW(compressed_writeback);
 #endif
 #ifdef CONFIG_ZRAM_MULTI_COMP
 static DEVICE_ATTR_RW(recomp_algorithm);
@@ -2526,6 +2572,7 @@ static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_writeback_limit.attr,
 	&dev_attr_writeback_limit_enable.attr,
 	&dev_attr_idle_page_size.attr,
+	&dev_attr_compressed_writeback.attr,
 #endif
 	&dev_attr_io_stat.attr,
 	&dev_attr_mm_stat.attr,
