@@ -356,6 +356,40 @@ out:
 }
 
 #ifdef CONFIG_ZRAM_WRITEBACK
+/*
+ * Compressed size of the idle pages still held in memory, i.e. what an
+ * "idle" or "wb_size=" writeback could take out of the pool. Kept from
+ * Lenovo's zram_ext, in the same "<KiB> K" format.
+ */
+static ssize_t idle_page_size_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct zram *zram = dev_to_zram(dev);
+	unsigned long nr_pages, index;
+	u64 size = 0;
+
+	down_read(&zram->init_lock);
+	if (!init_done(zram)) {
+		up_read(&zram->init_lock);
+		return -EINVAL;
+	}
+
+	nr_pages = zram->disksize >> PAGE_SHIFT;
+	for (index = 0; index < nr_pages; index++) {
+		zram_slot_lock(zram, index);
+		if (zram_allocated(zram, index) &&
+		    zram_test_flag(zram, index, ZRAM_IDLE) &&
+		    !zram_test_flag(zram, index, ZRAM_WB) &&
+		    !zram_test_flag(zram, index, ZRAM_UNDER_WB))
+			size += zram_get_obj_size(zram, index);
+		zram_slot_unlock(zram, index);
+		cond_resched();
+	}
+	up_read(&zram->init_lock);
+
+	return scnprintf(buf, PAGE_SIZE, "%llu K\n", size >> 10);
+}
+
 static ssize_t writeback_limit_enable_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t len)
 {
@@ -634,10 +668,13 @@ static int read_from_bdev_async(struct zram *zram, struct bio_vec *bvec,
 }
 
 #define PAGE_WB_SIG "page_index="
+/* Idle writeback until this much compressed data (KiB) has left memory. */
+#define SIZE_WB_SIG "wb_size="
 
 #define PAGE_WRITEBACK 0
 #define HUGE_WRITEBACK (1<<0)
 #define IDLE_WRITEBACK (1<<1)
+#define SIZE_WRITEBACK (1<<2)
 
 
 static ssize_t writeback_store(struct device *dev,
@@ -652,6 +689,8 @@ static ssize_t writeback_store(struct device *dev,
 	ssize_t ret = len;
 	int mode, err;
 	unsigned long blk_idx = 0;
+	u64 wb_bytes = 0;
+	unsigned int obj_size;
 
 	if (sysfs_streq(buf, "idle"))
 		mode = IDLE_WRITEBACK;
@@ -659,7 +698,14 @@ static ssize_t writeback_store(struct device *dev,
 		mode = HUGE_WRITEBACK;
 	else if (sysfs_streq(buf, "huge_idle"))
 		mode = IDLE_WRITEBACK | HUGE_WRITEBACK;
-	else {
+	else if (!strncmp(buf, SIZE_WB_SIG, sizeof(SIZE_WB_SIG) - 1)) {
+		if (kstrtou64(buf + sizeof(SIZE_WB_SIG) - 1, 10, &wb_bytes) ||
+				!wb_bytes || wb_bytes > (U64_MAX >> 10))
+			return -EINVAL;
+
+		wb_bytes <<= 10;
+		mode = SIZE_WRITEBACK | IDLE_WRITEBACK;
+	} else {
 		if (strncmp(buf, PAGE_WB_SIG, sizeof(PAGE_WB_SIG) - 1))
 			return -EINVAL;
 
@@ -733,6 +779,7 @@ static ssize_t writeback_store(struct device *dev,
 		zram_set_flag(zram, index, ZRAM_UNDER_WB);
 		/* Need for hugepage writeback racing */
 		zram_set_flag(zram, index, ZRAM_IDLE);
+		obj_size = zram_get_obj_size(zram, index);
 		zram_slot_unlock(zram, index);
 		if (zram_bvec_read(zram, &bvec, index, 0, NULL)) {
 			zram_slot_lock(zram, index);
@@ -789,6 +836,8 @@ static ssize_t writeback_store(struct device *dev,
 		zram_set_flag(zram, index, ZRAM_WB);
 		zram_set_element(zram, index, blk_idx);
 		blk_idx = 0;
+		if (mode & SIZE_WRITEBACK)
+			wb_bytes -= min_t(u64, wb_bytes, obj_size);
 		atomic64_inc(&zram->stats.pages_stored);
 		spin_lock(&zram->wb_limit_lock);
 		if (zram->wb_limit_enable && zram->bd_wb_limit > 0)
@@ -796,6 +845,8 @@ static ssize_t writeback_store(struct device *dev,
 		spin_unlock(&zram->wb_limit_lock);
 next:
 		zram_slot_unlock(zram, index);
+		if ((mode & SIZE_WRITEBACK) && !wb_bytes)
+			break;
 	}
 
 	if (blk_idx)
@@ -1867,6 +1918,7 @@ static DEVICE_ATTR_RW(backing_dev);
 static DEVICE_ATTR_WO(writeback);
 static DEVICE_ATTR_RW(writeback_limit);
 static DEVICE_ATTR_RW(writeback_limit_enable);
+static DEVICE_ATTR_RO(idle_page_size);
 #endif
 
 static struct attribute *zram_disk_attrs[] = {
@@ -1884,6 +1936,7 @@ static struct attribute *zram_disk_attrs[] = {
 	&dev_attr_writeback.attr,
 	&dev_attr_writeback_limit.attr,
 	&dev_attr_writeback_limit_enable.attr,
+	&dev_attr_idle_page_size.attr,
 #endif
 	&dev_attr_io_stat.attr,
 	&dev_attr_mm_stat.attr,
