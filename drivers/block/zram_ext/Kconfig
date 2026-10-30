@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-2.0
+config ZRAM_EXT
+	tristate "Compressed RAM block device with writeback (zram_ext)"
+	depends on ZRAM && m
+	select ZSMALLOC
+	help
+	  A copy of the zram driver, built as the zram_ext module with
+	  writeback to a backing device always enabled. GKI builds zram.ko
+	  without CONFIG_ZRAM_WRITEBACK, and a vendor module cannot change
+	  that, so devices that need writeback load zram_ext.ko instead of
+	  zram.ko. Both register the same block device and the same
+	  zram-control class: only one of them can be loaded.
+
+	  The default compressor is the one chosen for ZRAM.
+
+	  See Documentation/admin-guide/blockdev/zram.rst for the interface.
