@@ -132,6 +132,8 @@ struct zram {
 	struct file *backing_dev;
 	spinlock_t wb_limit_lock;
 	bool wb_limit_enable;
+	/* Written back slots hold the compressed object, not the page */
+	bool compressed_wb;
 	u64 bd_wb_limit;
 	struct block_device *bdev;
 	unsigned long *bitmap;
