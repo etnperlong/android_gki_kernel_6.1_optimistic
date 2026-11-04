@@ -55,34 +55,38 @@ ccflags-y += -DKSU_NO_PREINIT
 endif
 # ===== end preinit runner =====
 
-REPO_OWNER  := SukiSU-Ultra
 REPO_NAME   := SukiSU-Ultra
-REPO_BRANCH := main
 
+# SukiSU-Ultra is vendored here without its git history. Upstream derives
+# the version at build time from git and from the GitHub API (latest release
+# tag and the live commit count of the main branch), which is neither
+# available nor reproducible in-tree. Pin every value to the imported commit:
+# https://github.com/SukiSU-Ultra/SukiSU-Ultra/commit/1cfa57340590971cba7521ed536da8ebbedc5f0a
+# Update them whenever drivers/kernelsu/ is re-synced.
+#   KSU_MAIN_COUNT  = git rev-list --count main  (main at 075ac81f, as the
+#                     GitHub API reported it when this snapshot was imported)
+#   VERSION_TAG     = latest GitHub release tag, without the leading "v"
+#   KSU_COMMIT_SHA  = git rev-parse --short=8 HEAD  (the builtin snapshot)
+#   KSU_BRANCH      = git rev-parse --abbrev-ref HEAD
 VERSION_BASE    := 40000
 VERSION_OFFSET  := 2815
+KSU_MAIN_COUNT  := 3963
+VERSION_TAG     := 4.3.0-r1
+KSU_COMMIT_SHA  := 1cfa5734
+KSU_BRANCH      := builtin
+KSU_UAPI_VERSION := 6
 
-GIT_BIN  := /usr/bin/env PATH="$$PATH":/usr/bin:/usr/local/bin git
-CURL_BIN := /usr/bin/env PATH="$$PATH":/usr/bin:/usr/local/bin curl
+KSU_VERSION     := $(shell expr $(VERSION_BASE) + $(KSU_MAIN_COUNT) - $(VERSION_OFFSET))
+KSU_VERSION_FULL := v$(VERSION_TAG)-$(KSU_COMMIT_SHA)@$(KSU_BRANCH)
 
-KSU_SRC := $(if $(filter $(srctree),$(src)),$(src),$(srctree)/$(src))
-KSU_SRC := $(if $(wildcard $(KSU_SRC)/../.git),$(KSU_SRC),$(MDIR))
+# The UAPI version itself is a constant in include/uapi/supercall.h; refuse
+# to build if a re-sync changed it without updating the pins above.
+KSU_UAPI_VERSION_SRC := $(shell sed -n 's/^DECLARE(__u32, KERNEL_SU_UAPI_VERSION, \([0-9]*\));$$/\1/p' $(KSU_KERNEL_DIR)/include/uapi/supercall.h)
+ifneq ($(KSU_UAPI_VERSION_SRC),$(KSU_UAPI_VERSION))
+$(error $(REPO_NAME): include/uapi/supercall.h declares UAPI version '$(KSU_UAPI_VERSION_SRC)', expected $(KSU_UAPI_VERSION); re-pin the version values above)
+endif
 
-git_short_sha    = $(shell cd $(KSU_SRC) && $(GIT_BIN) rev-parse --short=8 HEAD 2>/dev/null)
-git_branch       = $(shell cd $(KSU_SRC) && $(GIT_BIN) rev-parse --abbrev-ref HEAD 2>/dev/null)
-git_commit_count = $(shell cd $(KSU_SRC) && $(GIT_BIN) rev-list --count $(REPO_BRANCH) 2>/dev/null)
-git_latest_tag   = $(shell cd $(KSU_SRC) && $(GIT_BIN) describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
-
-$(shell cd $(KSU_SRC) 2>/dev/null && [ -f ../.git/shallow ] && $(GIT_BIN) fetch --unshallow 2>/dev/null)
-
-GITHUB_API_BASE  := https://api.github.com/repos/$(REPO_OWNER)/$(REPO_NAME)
-KSU_GITHUB_VER   := $(shell $(CURL_BIN) -s "$(GITHUB_API_BASE)/releases/latest" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"v?([^"]+)".*/\1/')
-GITHUB_COMMITS   := $(shell $(CURL_BIN) -sI "$(GITHUB_API_BASE)/commits?sha=$(REPO_BRANCH)&per_page=1" 2>/dev/null | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p')
-LOCAL_COUNT     := $(if $(GITHUB_COMMITS),$(GITHUB_COMMITS),$(git_commit_count))
-KSU_VERSION     := $(if $(LOCAL_COUNT),$(shell expr $(VERSION_BASE) + $(LOCAL_COUNT) - $(VERSION_OFFSET)),13000)
-VERSION_TAG     := $(or $(KSU_GITHUB_VER),$(git_latest_tag),4.2.1)
-KSU_VERSION_FULL := $(if $(call git_short_sha),v$(VERSION_TAG)-$(call git_short_sha)@$(call git_branch),v$(VERSION_TAG)-$(REPO_NAME)-unknown@unknown)
-$(info -- $(REPO_NAME) version: $(KSU_VERSION) [$(KSU_VERSION_FULL)])
+$(info -- $(REPO_NAME) version: $(KSU_VERSION) [$(KSU_VERSION_FULL)], UAPI $(KSU_UAPI_VERSION))
 
 ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
 ccflags-y += -DKSU_VERSION_FULL=\"$(KSU_VERSION_FULL)\"
