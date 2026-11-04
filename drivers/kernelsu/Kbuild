@@ -125,6 +125,13 @@ $(error SUSFS Inline hook-site check failed)
 endif
 endif
 
+# Upstream asks built-in integrations to pass KSU_REQUIRE_PREINIT=1
+# (docs/builtin-integration.md). It is required here: the SusFS kernel patch
+# calls ksu_setup_preinit_file() and ksu_preinit_handle_post_execveat() from
+# fs/exec.c, which only exist when the preinit runner is built. Fail at this
+# point rather than at link time if the installed UAPI headers are missing.
+KSU_REQUIRE_PREINIT := 1
+
 KSU_UAPI_INC := $(objtree)/usr/include
 ifneq ($(wildcard $(KSU_UAPI_INC)/linux/unistd.h),)
 kernelsu-objs += preinit/preinit.o
@@ -162,47 +169,29 @@ endif
 
 obj-$(CONFIG_KSU) += kernelsu.o
 
-MDIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+# FinaSU is vendored here without its git history, so the git probing upstream
+# does here would find this kernel's own repository and fall back to version 16
+# and "v0.0.0-00000000@unknown". Pin the values upstream computes on the
+# imported commit instead:
+# https://github.com/LyraVoid/FinaSU/commit/a839ce2d742f0f1450a3aad20bdc14bc060da840
+#   30000 + git rev-list --count HEAD    3168  ->  33168
+#   git describe --tags --abbrev=0       v1.4.5
+#   git rev-parse --short=8 HEAD         a839ce2d
+#   git rev-parse --abbrev-ref HEAD      master
+# Update all of them whenever drivers/kernelsu/ is re-synced.
+KSU_VERSION := 33168
+KSU_VERSION_FULL := v1.4.5-a839ce2d@master
+KSU_UAPI_VERSION := 6
 
-# Workaround bazel
-# https://github.com/tiann/KernelSU/pull/316#issuecomment-1479043219
-GIT := $(shell PATH="$$PATH":/usr/bin:/usr/local/bin which git)
-ifneq ($(GIT),)
-# Check if this is a git repository
-# Try to detect Git repo intelligently
-GIT_ROOT := $(shell cd $(MDIR) && $(GIT) rev-parse --show-toplevel 2>/dev/null)
-ifneq ($(GIT_ROOT),)
-KERNEL_GIT_ROOT := $(shell cd $(srctree) && $(GIT) rev-parse --show-toplevel 2>/dev/null)
-ifneq ($(GIT_ROOT),$(KERNEL_GIT_ROOT))
-# Only set version if it's a different repo from kernel
-$(shell cd $(GIT_ROOT) && [ -f .git/shallow ] && $(GIT) fetch --unshallow 2>/dev/null || true)
-KSU_GIT_VERSION := $(shell cd $(GIT_ROOT) && $(GIT) rev-list --count HEAD 2>/dev/null)
-KSU_GIT_VERSION_VALID := 1
-$(info -- KernelSU: Git repo detected at $(GIT_ROOT))
-endif
-endif
-else
-$(warning -- KernelSU: Git not detected, make sure git is installed in your PATH!)
+# The UAPI version itself is a constant in include/uapi/supercall.h; refuse
+# to build if a re-sync changed it without updating the pins above.
+KSU_UAPI_VERSION_SRC := $(shell sed -n 's/^static const __u32 KERNEL_SU_UAPI_VERSION = \([0-9]*\);$$/\1/p' $(KSU_KERNEL_DIR)/include/uapi/supercall.h)
+ifneq ($(KSU_UAPI_VERSION_SRC),$(KSU_UAPI_VERSION))
+$(error KernelSU: include/uapi/supercall.h declares UAPI version '$(KSU_UAPI_VERSION_SRC)', expected $(KSU_UAPI_VERSION); re-pin KSU_VERSION, KSU_VERSION_FULL and KSU_UAPI_VERSION)
 endif
 
-
-# Calculate version if git version is available
-ifdef KSU_GIT_VERSION_VALID
-# ksu_version: major * 10000 + git version + 200 for historical reasons
-$(eval KSU_VERSION=$(shell expr 30000 + $(KSU_GIT_VERSION)))
-$(info -- KernelSU version: $(KSU_VERSION))
+$(info -- KernelSU version: $(KSU_VERSION) (UAPI $(KSU_UAPI_VERSION)))
 ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
-KSU_VERSION_TAG := $(shell cd $(GIT_ROOT) && $(GIT) describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')
-KSU_VERSION_SHA := $(shell cd $(GIT_ROOT) && $(GIT) rev-parse --short=8 HEAD 2>/dev/null)
-KSU_VERSION_BRANCH := $(shell cd $(GIT_ROOT) && $(GIT) rev-parse --abbrev-ref HEAD 2>/dev/null)
-KSU_VERSION_FULL := v$(if $(KSU_VERSION_TAG),$(KSU_VERSION_TAG),unknown)-$(KSU_VERSION_SHA)@$(KSU_VERSION_BRANCH)
-else
-# If there is no .git directory, use default version
-$(warning "KSU_GIT_VERSION not defined! It is better to make KernelSU a git repository!")
-ccflags-y += -DKSU_VERSION=16
-KSU_VERSION_FULL := v0.0.0-00000000@unknown
-endif
-
 $(info -- KernelSU version full: $(KSU_VERSION_FULL))
 ccflags-y += -DKSU_VERSION_FULL=\"$(KSU_VERSION_FULL)\"
 
@@ -228,6 +217,19 @@ $(info -- KernelSU Manager signature hash: $(KSU_EXPECTED_HASH))
 
 ccflags-y += -DEXPECTED_SIZE=$(KSU_EXPECTED_SIZE)
 ccflags-y += -DEXPECTED_HASH=\"$(KSU_EXPECTED_HASH)\"
+
+# Release managers are signed with FinaSU's own key, which upstream CI passes to
+# the kernel build as the second slot together with second_signature_release=1
+# (.github/workflows/build-manager.yml: DER length and SHA-256 of the release
+# certificate). The slot 1 default above is official KernelSU's key and only a
+# placeholder; with slot 2 set it is not trusted. Pin the release key:
+#   apksigner verify --print-certs-pem FinaSU_v1.4.5_33168-release.apk
+#   -> CN=FolkSU, 716 (0x2cc) bytes, SHA-256 2d89b50a...
+# https://github.com/LyraVoid/FinaSU/releases/tag/v1.4.5
+# The v1.4.5 release arm64/android14-6.1_kernelsu.ko trusts the same entry.
+KSU_EXPECTED_SIZE2 := 0x02cc
+KSU_EXPECTED_HASH2 := 2d89b50aaf1db013c2b6738f973f48b62ea21a3a8d7216bfec3521065d448458
+KSU_SECOND_SIGNATURE_RELEASE := 1
 
 ifdef KSU_EXPECTED_SIZE2
 ifndef KSU_EXPECTED_HASH2
