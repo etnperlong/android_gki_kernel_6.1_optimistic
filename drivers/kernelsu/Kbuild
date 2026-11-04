@@ -58,33 +58,35 @@ REPO_NAME := BakaSU
 
 KDIR := $(KDIR)
 
-GIT_BIN := /usr/bin/env PATH="$$PATH":/usr/bin:/usr/local/bin git
-
 KSU_SRC := $(realpath $(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
-
-LOCAL_GIT_EXISTS := $(shell test -e $(KSU_SRC)/../.git && echo 1 || echo 0)
-
-ifeq ($(LOCAL_GIT_EXISTS),0)
-$(info -- Can't find $(REPO_NAME) git submodule!)
-$(info -- If you are using bazel to build this kernel,)
-$(info -- Please go to Kbuild and change KSU_SRC to the absolute path of the KSU kernel folder.)
-$(error You should use $(REPO_NAME) as a git submodule instead of copying code directly)
-endif
 
 ifdef KBUILD_EXTMOD
 include $(KSU_SRC)/tools/ddk_compatible.mk
 endif
 
-$(shell cd $(KSU_SRC); [ -f ../.git/shallow ] && $(GIT_BIN) fetch --unshallow)
-KSU_LOCAL_VERSION := $(shell cd $(KSU_SRC); $(GIT_BIN) rev-list --count HEAD)
+# BakaSU is vendored here without its git history, so upstream's git
+# probing cannot work in-tree (it refuses to build without ../.git). Pin
+# every value it would compute to the imported commit:
+# https://github.com/Baka-SU/BakaSU/commit/516d3e87fbc986ccefdde2c2765f1700612441a9
+# Update them whenever drivers/kernelsu/ is re-synced.
+#   KSU_LOCAL_VERSION = git rev-list --count HEAD
+#   KSU_TAG_NAME      = git describe --abbrev=0 --tags
+#   KSU_COMMIT_SHA    = git rev-parse --short=8 HEAD
+#   KSU_BRANCH_NAME   = git branch --show-current
+KSU_LOCAL_VERSION := 4557
 KSU_VERSION := $(shell expr 30000 + $(KSU_LOCAL_VERSION) + 700)
+KSU_TAG_NAME    := v4.2.0-rc3
+KSU_COMMIT_SHA  := 516d3e87
+KSU_BRANCH_NAME := main
+KSU_UAPI_VERSION := 6
 
-KSU_TAG_NAME    := $(shell cd $(KSU_SRC); $(GIT_BIN) describe --abbrev=0 --tags 2>/dev/null || echo "v4.1.0")
-KSU_COMMIT_SHA  := $(shell cd $(KSU_SRC); $(GIT_BIN) rev-parse --short=8 HEAD 2>/dev/null || echo "unknown")
-ifneq ($(shell cd $(KSU_SRC); $(GIT_BIN) diff-index --quiet HEAD; echo $$?),0)
-KSU_COMMIT_SHA  := $(KSU_COMMIT_SHA)-dirty
+# The UAPI version itself is a constant in include/uapi/supercall.h; refuse
+# to build if a re-sync changed it without updating the pins above.
+KSU_UAPI_VERSION_SRC := $(shell sed -n 's/^static const __u32 KERNEL_SU_UAPI_VERSION = \([0-9]*\);$$/\1/p' $(KSU_SRC)/include/uapi/supercall.h)
+ifneq ($(KSU_UAPI_VERSION_SRC),$(KSU_UAPI_VERSION))
+$(error $(REPO_NAME): include/uapi/supercall.h declares UAPI version '$(KSU_UAPI_VERSION_SRC)', expected $(KSU_UAPI_VERSION); re-pin the version values above)
 endif
-KSU_BRANCH_NAME := $(shell cd $(KSU_SRC); $(GIT_BIN) branch --show-current 2>/dev/null || echo "unknown")
+$(info -- $(REPO_NAME) UAPI version: $(KSU_UAPI_VERSION))
 
 # call subst to process placeholders
 KSU_VERSION_FULL := $(subst ",,$(CONFIG_KSU_FULL_NAME_FORMAT))
