@@ -12,7 +12,7 @@
 
 #include "klog.h" // IWYU pragma: keep
 #include "util.h"
-#include "hook/syscall_hook.h"
+#include "runtime/ksud.h"
 #include "preinit/preinit.h"
 
 #define INIT_PATH "/system/bin/init"
@@ -80,84 +80,80 @@ void ksu_preinit_exit(void)
     ksu_preinit_release();
 }
 
-static bool is_selinux_setup(const char __user *const __user *argv_user)
+static bool is_selinux_setup(struct user_arg_ptr *argv_user)
 {
     static const char expected[] = "selinux_setup";
-    const char __user *arg;
-    char buf[sizeof(expected) + 1];
+    char buf[sizeof(expected) + 1] = {0};
+    const char __user *argv_user_ptr = get_user_arg_ptr(*argv_user, 1);
 
-    if (!argv_user || get_user(arg, argv_user + 1) || !arg)
+    if (!argv_user_ptr || IS_ERR(argv_user_ptr)) {
+        pr_err("!argv_user_ptr || IS_ERR(argv_user_ptr)\n");
         return false;
+    }
 
-    memset(buf, 0, sizeof(buf));
-    if (strncpy_from_user(buf, arg, sizeof(buf) - 1) < 0)
+    if (strncpy_from_user(buf, argv_user_ptr, sizeof(buf) - 1) < 0)
         return false;
 
     return !strcmp(buf, expected);
 }
 
-bool ksu_preinit_handle_execve(const char __user **filename_user, const char __user *const __user *argv_user,
-                               int orig_nr, struct pt_regs *regs, long *ret)
+int ksu_setup_preinit_file(struct filename **filename_ptr, struct user_arg_ptr *argv_user)
 {
-    const char __user *orig_filename;
-    char path[sizeof(INIT_PATH) + 1];
-    char fd_path[32];
+    char fd_path[32] = {0};
     struct file *file;
-    struct path p;
+    struct path path;
     int fd, len;
 
     if (likely(!READ_ONCE(ksu_preinit_file)))
-        return false;
+        return -EINVAL;
 
-    if (!filename_user || !*filename_user)
-        return false;
+    if (strcmp((*filename_ptr)->name, INIT_PATH) || !is_selinux_setup(argv_user))
+        return -EINVAL;
 
-    memset(path, 0, sizeof(path));
-    if (strncpy_from_user(path, (const char __user *)untagged_addr((unsigned long)*filename_user), sizeof(path) - 1) <
-        0)
-        return false;
-
-    if (strcmp(path, INIT_PATH) || !is_selinux_setup(argv_user))
-        return false;
-
-    // One shot: the runner's own exec of the real init must pass through.
     file = xchg(&ksu_preinit_file, NULL);
     if (!file)
-        return false;
+        return -EINVAL;
 
     fd = get_unused_fd_flags(O_CLOEXEC);
     if (fd < 0) {
         pr_err("preinit: get fd failed: %d\n", fd);
         fput(file);
-        return false;
+        return -EINVAL;
     }
     // The fd owns the file from here on; close-on-exec frees it once the
     // runner has been loaded.
     fd_install(fd, file);
 
     len = snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", fd);
-    if (kern_path(fd_path, LOOKUP_FOLLOW, &p)) {
+    if (kern_path(fd_path, LOOKUP_FOLLOW, &path)) {
         pr_err("preinit: %s not reachable, booting without preinit\n", fd_path);
         ksu_close_fd(fd);
-        return false;
+        return -EINVAL;
     }
-    path_put(&p);
+    path_put(&path);
 
-    orig_filename = *filename_user;
-    *filename_user = userspace_stack_buffer(fd_path, len + 1);
-    if (!*filename_user) {
-        *filename_user = orig_filename;
-        ksu_close_fd(fd);
-        return false;
-    }
+    memset((void*)(*filename_ptr)->name, 0, strlen((*filename_ptr)->name));
+    memcpy((void*)(*filename_ptr)->name, (void*)fd_path, strlen(fd_path));
 
     pr_info("preinit: exec runner via %s\n", fd_path);
-    *ret = ksu_syscall_table[orig_nr](regs);
-    if (*ret < 0) {
-        pr_err("preinit: exec runner failed: %ld, booting without preinit\n", *ret);
-        *filename_user = orig_filename;
-        ksu_close_fd(fd);
-        *ret = ksu_syscall_table[orig_nr](regs);
+    return fd;
+}
+
+int ksu_preinit_handle_post_execveat(int *fd, struct filename **filename_ptr,
+                 void *argv_user, void *envp_user,
+                 int *flags, int *retval, int *preinit_fd)
+{
+    if (*retval && *preinit_fd > 0) {
+        ksu_close_fd(*preinit_fd);
+        memset((void*)(*filename_ptr)->name, 0, strlen((*filename_ptr)->name));
+        memcpy((void*)(*filename_ptr)->name, INIT_PATH, strlen(INIT_PATH));
+        return -EINVAL;
     }
-    return true;
+    return 0;
+}
+
+bool ksu_preinit_handle_execve(const char __user **filename_user, const char __user *const __user *argv_user,
+                               int orig_nr, struct pt_regs *regs, long *ret)
+{
+    return false;
 }
