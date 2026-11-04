@@ -112,41 +112,23 @@ endif
 
 obj-$(CONFIG_KSU) += kernelsu.o
 
-MDIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+# KernelSU is vendored here without its git history, so upstream's
+# "30000 + git rev-list --count HEAD" version cannot be computed in-tree
+# (it would fall back to 16). Pin both versions to the imported commit:
+# https://github.com/tiann/KernelSU/commit/28db74f6f4692e97006ce9ebd8b19b9cc614b5b7
+# Update both values whenever drivers/kernelsu/ is re-synced.
+KSU_VERSION := 32716
+KSU_UAPI_VERSION := 6
 
-# Workaround bazel
-# https://github.com/tiann/KernelSU/pull/316#issuecomment-1479043219
-GIT := $(shell PATH="$$PATH":/usr/bin:/usr/local/bin which git)
-ifneq ($(GIT),)
-# Check if this is a git repository
-# Try to detect Git repo intelligently
-GIT_ROOT := $(shell cd $(MDIR) && $(GIT) rev-parse --show-toplevel 2>/dev/null)
-ifneq ($(GIT_ROOT),)
-KERNEL_GIT_ROOT := $(shell cd $(srctree) && $(GIT) rev-parse --show-toplevel 2>/dev/null)
-ifneq ($(GIT_ROOT),$(KERNEL_GIT_ROOT))
-# Only set version if it's a different repo from kernel
-$(shell cd $(GIT_ROOT) && [ -f .git/shallow ] && $(GIT) fetch --unshallow 2>/dev/null || true)
-KSU_GIT_VERSION := $(shell cd $(GIT_ROOT) && $(GIT) rev-list --count HEAD 2>/dev/null)
-KSU_GIT_VERSION_VALID := 1
-$(info -- KernelSU: Git repo detected at $(GIT_ROOT))
-endif
-endif
-else
-$(warning -- KernelSU: Git not detected, make sure git is installed in your PATH!)
+# The UAPI version itself is a constant in include/uapi/supercall.h; refuse
+# to build if a re-sync changed it without updating the pins above.
+KSU_UAPI_VERSION_SRC := $(shell sed -n 's/^static const __u32 KERNEL_SU_UAPI_VERSION = \([0-9]*\);$$/\1/p' $(KSU_KERNEL_DIR)/include/uapi/supercall.h)
+ifneq ($(KSU_UAPI_VERSION_SRC),$(KSU_UAPI_VERSION))
+$(error KernelSU: include/uapi/supercall.h declares UAPI version '$(KSU_UAPI_VERSION_SRC)', expected $(KSU_UAPI_VERSION); re-pin KSU_VERSION and KSU_UAPI_VERSION)
 endif
 
-
-# Calculate version if git version is available
-ifdef KSU_GIT_VERSION_VALID
-# ksu_version: major * 10000 + git version + 200 for historical reasons
-$(eval KSU_VERSION=$(shell expr 30000 + $(KSU_GIT_VERSION)))
-$(info -- KernelSU version: $(KSU_VERSION))
+$(info -- KernelSU version: $(KSU_VERSION) (UAPI $(KSU_UAPI_VERSION)))
 ccflags-y += -DKSU_VERSION=$(KSU_VERSION)
-else
-# If there is no .git directory, use default version
-$(warning "KSU_GIT_VERSION not defined! It is better to make KernelSU a git repository!")
-ccflags-y += -DKSU_VERSION=16
-endif
 
 KSU_NEW_DCACHE_FLUSH := $(shell grep -q __flush_dcache_area $(srctree)/arch/arm64/include/asm/cacheflush.h ; echo $$?)
 $(info -- KSU_NEW_DCACHE_FLUSH: $(KSU_NEW_DCACHE_FLUSH))
