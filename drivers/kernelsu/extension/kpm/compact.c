@@ -98,4 +98,6 @@ unsigned long sukisu_compact_find_symbol(const char *name)
 
     return 0;
 }
+#ifdef CONFIG_KPM
 EXPORT_SYMBOL(sukisu_compact_find_symbol);
+#endif

@@ -212,7 +212,9 @@ int sukisu_super_find_struct(const char *struct_name, size_t *out_size,
 
     return -1;
 }
+#ifdef CONFIG_KPM
 EXPORT_SYMBOL(sukisu_super_find_struct);
+#endif
 
 /*
  * Dynamic access struct
@@ -247,7 +249,9 @@ int sukisu_super_access(const char *struct_name, const char *member_name,
 
     return -1;
 }
+#ifdef CONFIG_KPM
 EXPORT_SYMBOL(sukisu_super_access);
+#endif
 
 #define DYNAMIC_CONTAINER_OF(offset, member_ptr)                               \
     ({ (offset != (size_t)-1) ? (void *)((char *)(member_ptr)-offset) : NULL; })
@@ -285,4 +289,6 @@ int sukisu_super_container_of(const char *struct_name, const char *member_name,
 
     return -1;
 }
+#ifdef CONFIG_KPM
 EXPORT_SYMBOL(sukisu_super_container_of);
+#endif
